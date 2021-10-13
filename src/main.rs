@@ -26,9 +26,23 @@ enum MyResponse {
 
 static INDEX_HTML: &str = include_str!("static/index.html");
 
+// created using https://github.com/remy/inliner
+static SWAGGER_HTML: &str = include_str!("static/swagger.html");
+static SWAGGER_JSON: &str = include_str!("static/swagger.json");
+
 #[get("/")]
 fn index_html() -> (ContentType, &'static str) {
     return (ContentType::HTML, INDEX_HTML);
+}
+
+#[get("/swagger.html")]
+fn swagger_html() -> (ContentType, &'static str) {
+    return (ContentType::HTML, SWAGGER_HTML);
+}
+
+#[get("/swagger.json")]
+fn swagger_json() -> (ContentType, &'static str) {
+    return (ContentType::JSON, SWAGGER_JSON);
 }
 
 #[get("/config")]
@@ -134,6 +148,9 @@ fn rocket() -> _ {
             .manage(MyState {
                 hat: Mutex::new(hat),
             })
-            .mount("/", routes![index_html, get_config, transmit]),
+            .mount(
+                "/",
+                routes![index_html, swagger_html, swagger_json, get_config, transmit],
+            ),
     }
 }

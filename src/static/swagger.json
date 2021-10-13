@@ -1,0 +1,9 @@
+{
+    "title": "UnisonHT: Raspberry Pi IR Hat",
+    "description": "UnisonHT web service for Raspberry Pi IR Hat.",
+    "license": {
+        "name": "MIT",
+        "url": "https://opensource.org/licenses/MIT"
+    },
+    "version": "1.0.1"
+}
