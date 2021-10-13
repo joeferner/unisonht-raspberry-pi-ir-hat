@@ -17,9 +17,11 @@ struct MyState {
 #[derive(Responder)]
 enum MyResponse {
     #[response(status = 200)]
-    Ok(String),
+    Ok(String, ContentType),
     #[response(status = 404)]
     NotFound(String),
+    #[response(status = 408)]
+    Timeout(String),
     #[response(status = 500)]
     ServerError(String),
 }
@@ -45,18 +47,18 @@ fn swagger_json() -> (ContentType, &'static str) {
     return (ContentType::JSON, SWAGGER_JSON);
 }
 
-#[get("/config")]
+#[get("/api/v1/config")]
 fn get_config(state: &State<MyState>) -> MyResponse {
     return match state.hat.lock() {
         Result::Err(err) => MyResponse::ServerError(format!("failed to lock: {}", err)),
         Result::Ok(hat) => match serde_json::to_string(hat.get_config()) {
             Result::Err(err) => MyResponse::ServerError(format!("{}", err)),
-            Result::Ok(config_json) => MyResponse::Ok(config_json),
+            Result::Ok(config_json) => MyResponse::Ok(config_json, ContentType::JSON),
         },
     };
 }
 
-#[post("/transmit/<remote_name>/<button_name>")]
+#[post("/api/v1/transmit/<remote_name>/<button_name>")]
 fn transmit(state: &State<MyState>, remote_name: &str, button_name: &str) -> MyResponse {
     return match state.hat.lock() {
         Result::Err(err) => MyResponse::ServerError(format!("failed to lock: {}", err)),
@@ -69,9 +71,10 @@ fn transmit(state: &State<MyState>, remote_name: &str, button_name: &str) -> MyR
                     "button not found {}:{}",
                     remote_name, button_name
                 )),
+                HatError::Timeout(err) => MyResponse::Timeout(format!("{}", err)),
                 _ => MyResponse::ServerError(format!("{}", err)),
             },
-            Result::Ok(_) => MyResponse::Ok(format!("success")),
+            Result::Ok(_) => MyResponse::Ok("{}".to_string(), ContentType::JSON),
         },
     };
 }
