@@ -1,0 +1,121 @@
+<html>
+
+<head>
+    <title>UnisonHT: Raspberry Pi IR Hat</title>
+    <style>
+        form {
+            border: 1px solid black;
+            margin: 10px;
+            padding: 10px;
+            display: flex;
+            flex-direction: column;
+            width: 400px;
+        }
+
+        label {
+            margin: 5px;
+        }
+
+        .actions {
+            display: flex;
+            flex-direction: row;
+        }
+    </style>
+    <script type="text/javascript">
+        let config = undefined;
+
+        function doRequest(method, url) {
+            return new Promise((resolve, reject) => {
+                const xhr = new XMLHttpRequest();
+                xhr.onreadystatechange = (e) => {
+                    if (xhr.readyState === XMLHttpRequest.DONE) {
+                        var status = xhr.status;
+                        if (status === 0 || (status >= 200 && status < 400)) {
+                            resolve(xhr.responseText);
+                        } else {
+                            console.error(status, xhr.responseText);
+                            reject(`error: ${status}: ${xhr.responseText}`);
+                        }
+                    }
+                }
+                xhr.open(method, url);
+                xhr.send();
+            });
+        }
+
+        function doInit() {
+            doRequest('GET', '/config')
+                .then((configString) => {
+                    config = JSON.parse(configString);
+                    console.log("config", config);
+
+                    const remoteNames = Object.keys(config.remotes);
+                    const remoteNameOptionsHtml = remoteNames.map(remoteName => {
+                        return `<option value="${remoteName}">${remoteName}</option>`;
+                    }).join('\n');
+
+                    const transmitForm = document.getElementById("transmitForm");
+                    const remoteNameSelect = transmitForm.querySelector('select[name="remoteName"]');
+                    remoteNameSelect.innerHTML = remoteNameOptionsHtml;
+
+                    handleTransmitRemoteNameChange();
+                }).catch(err => {
+                    console.error(err);
+                    alert('failed to load config');
+                });
+        }
+
+        function handleTransmitSubmit() {
+            try {
+                const transmitForm = document.getElementById("transmitForm");
+                const statusDiv = transmitForm.querySelector('.status');
+                statusDiv.innerHTML = '';
+                const remoteName = transmitForm.querySelector('select[name="remoteName"]').value;
+                const buttonName = transmitForm.querySelector('select[name="buttonName"]').value;
+                doRequest('POST', `/transmit/${remoteName}/${buttonName}`)
+                    .then(() => {
+                        statusDiv.innerHTML = 'Complete';
+                    }).catch(err => {
+                        statusDiv.innerHTML = err;
+                    });
+            } catch (err) {
+                console.error(err);
+            }
+            return false;
+        }
+
+        function handleTransmitRemoteNameChange() {
+            const remoteName = transmitForm.querySelector('select[name="remoteName"]').value;
+            const buttonNameSelect = transmitForm.querySelector('select[name="buttonName"]');
+
+            const buttonNames = Object.keys(config.remotes[remoteName].buttons);
+            const buttonNameOptionsHtml = buttonNames.map(buttonName => {
+                return `<option value="${buttonName}">${buttonName}</option>`;
+            }).join('\n');
+
+            buttonNameSelect.innerHTML = buttonNameOptionsHtml;
+        }
+    </script>
+</head>
+
+<body onload="doInit()">
+    <h1>Transmit</h1>
+    <form id="transmitForm" onsubmit="return handleTransmitSubmit()">
+        <label>
+            Remote Name
+            <select name="remoteName" onchange="handleTransmitRemoteNameChange()"></select>
+        </label>
+
+        <label>
+            Button Name
+            <select name="buttonName"></select>
+        </label>
+
+        <div class="actions">
+            <button type="submit">Transmit</button>
+        </div>
+        <div class="status"></div>
+    </form>
+</body>
+
+</html>
