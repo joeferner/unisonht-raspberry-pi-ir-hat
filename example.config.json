@@ -13,10 +13,10 @@
         "test2": {
             "buttons": {
                 "channelUp": {
-                    "signal": "100,200,300"
+                    "signal": "200,200,300"
                 },
                 "channelDown": {
-                    "signal": "100,200,400"
+                    "signal": "200,200,400"
                 }
             }
         }
