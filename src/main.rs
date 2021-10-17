@@ -5,7 +5,7 @@ use clap::App;
 use clap::Arg;
 use log::{error, info};
 use raspberry_pi_ir_hat::Config;
-use raspberry_pi_ir_hat::{Hat, HatError, HatMessage};
+use raspberry_pi_ir_hat::{ButtonPress, Hat, HatError, HatMessage};
 use rocket::http::ContentType;
 use rocket::response::Responder;
 use rocket::State;
@@ -53,7 +53,7 @@ fn swagger_json() -> (ContentType, &'static str) {
 fn get_config(state: &State<MyState>) -> MyResponse {
     return match state.hat.lock() {
         Result::Err(err) => MyResponse::ServerError(format!("failed to lock: {}", err)),
-        Result::Ok(hat) => match serde_json::to_string(hat.get_config()) {
+        Result::Ok(hat) => match hat.get_config().to_json_string() {
             Result::Err(err) => MyResponse::ServerError(format!("{}", err)),
             Result::Ok(config_json) => MyResponse::Ok(config_json, ContentType::JSON),
         },
@@ -81,24 +81,88 @@ fn transmit(state: &State<MyState>, remote_name: &str, button_name: &str) -> MyR
     };
 }
 
-fn send_button_press(url_template: &String, remote_name: &String, button_name: &String) {
-    let url = url_template
-        .replace("{remoteName}", &remote_name)
-        .replace("{buttonName}", &button_name);
-    info!(
-        "button press: {} {}, calling {}",
-        remote_name, button_name, url
-    );
-    match ureq::post(&url).call() {
-        Result::Ok(_response) => {}
-        Result::Err(err) => {
-            error!("failed to call url: {}: {}", url, err);
+fn handle_button_press(config: &Config, button_press: &ButtonPress) -> Result<(), String> {
+    let button = config
+        .get_button(&button_press.remote_name, &button_press.button_name)
+        .ok_or_else(|| {
+            format!(
+                "could not find button {}:{}",
+                button_press.remote_name, button_press.button_name
+            )
+        })?;
+    match button.get_json().get("unisonhtAction") {
+        Option::None => return Result::Ok(()),
+        Option::Some(action_value) => {
+            let action = action_value.as_object().ok_or_else(|| {
+                format!(
+                    "button {}:{} unisonhtAction should be an object",
+                    button_press.remote_name, button_press.button_name
+                )
+            })?;
+            let action_type = action
+                .get("type")
+                .ok_or_else(|| {
+                    format!(
+                        "button {}:{} unisonhtAction should have 'type'",
+                        button_press.remote_name, button_press.button_name
+                    )
+                })?
+                .as_str()
+                .ok_or_else(|| {
+                    format!(
+                        "button {}:{} unisonhtAction should have string 'type'",
+                        button_press.remote_name, button_press.button_name
+                    )
+                })?;
+            match action_type {
+                "http" => {
+                    return do_http_action(&action).map_err(|err| {
+                        format!(
+                            "error executing action {}:{}: {}",
+                            button_press.remote_name, button_press.button_name, err
+                        )
+                    });
+                }
+                _ => {
+                    return Result::Err(format!(
+                        "button {}:{} has invalid type: {}",
+                        button_press.remote_name, button_press.button_name, action_type
+                    ));
+                }
+            }
         }
+    }
+}
+
+fn do_http_action(action: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
+    let url = action
+        .get("url")
+        .ok_or_else(|| format!("'http' actions should have a url"))?
+        .as_str()
+        .ok_or_else(|| format!("'http' actions should have a string url"))?;
+    let method = match action.get("method") {
+        Option::None => Result::Ok("post".to_string()),
+        Option::Some(method_value) => match method_value.as_str() {
+            Option::None => Result::Err(format!("'http' actions should have a string url")),
+            Option::Some(m) => Result::Ok(m.to_lowercase()),
+        },
+    }?;
+    info!("calling {} {}", method, url);
+    let response = match method.as_ref() {
+        "get" => ureq::get(url).call(),
+        "post" => ureq::post(url).call(),
+        _ => return Result::Err(format!("unexpected http method: {}", method)),
+    };
+    return match response {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(err) => Result::Err(format!("failed to call: {} {}: {}", method, url, err)),
     };
 }
 
 fn init() -> std::result::Result<Hat, String> {
-    SimpleLogger::new().init().map_err(|err| format!("{}", err));
+    SimpleLogger::new()
+        .init()
+        .map_err(|err| format!("{}", err))?;
 
     let args = App::new("UnisonHT - Raspberry Pi IrHat")
         .version("1.0.0")
@@ -111,12 +175,6 @@ fn init() -> std::result::Result<Hat, String> {
                 .value_name("FILE")
                 .help("File to load IR signals to")
                 .required(true)
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("button_press_target_url")
-                .long("button-press-target-url")
-                .help("URL to POST send button presses to (http://localhost/button-press/{remoteName}/{buttonName})")
                 .takes_value(true),
         )
         .arg(
@@ -141,9 +199,6 @@ fn init() -> std::result::Result<Hat, String> {
     let config = Config::read(config_filename, false)
         .map_err(|err| format!("failed to read config {}", err))?;
     let port = args.value_of("port").unwrap();
-    let button_press_target_url: Option<String> = args
-        .value_of("button_press_target_url")
-        .map(|s| s.to_owned());
     let tolerance = args
         .value_of("tolerance")
         .unwrap()
@@ -155,27 +210,18 @@ fn init() -> std::result::Result<Hat, String> {
                 err
             )
         })?;
+    let callback_config = config.clone();
     let mut hat = Hat::new(
         config,
         port,
         tolerance,
         Box::new(move |message| {
             match message {
-                HatMessage::ButtonPress(button_press) => match &button_press_target_url {
-                    Option::None => {
-                        info!(
-                            "button press: {} {}",
-                            button_press.remote_name, button_press.button_name
-                        );
+                HatMessage::ButtonPress(button_press) => {
+                    if let Result::Err(err) = handle_button_press(&callback_config, &button_press) {
+                        error!("{}", err);
                     }
-                    Option::Some(url) => {
-                        send_button_press(
-                            url,
-                            &button_press.remote_name,
-                            &button_press.button_name,
-                        );
-                    }
-                },
+                }
                 HatMessage::Error(err) => {
                     error!("{:#?}", err);
                 }
