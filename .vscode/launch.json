@@ -23,9 +23,7 @@
                 "--config",
                 "example.config.json",
                 "--port",
-                "/dev/pts/6",
-                "--button-press-target-url",
-                "http://localhost/button-press/{remoteName}/{buttonName}"
+                "/dev/pts/6"
             ],
             "cwd": "${workspaceFolder}"
         },

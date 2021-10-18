@@ -90,12 +90,12 @@ fn handle_button_press(config: &Config, button_press: &ButtonPress) -> Result<()
                 button_press.remote_name, button_press.button_name
             )
         })?;
-    match button.get_json().get("unisonhtAction") {
+    match button.get_json().get("action") {
         Option::None => return Result::Ok(()),
         Option::Some(action_value) => {
             let action = action_value.as_object().ok_or_else(|| {
                 format!(
-                    "button {}:{} unisonhtAction should be an object",
+                    "button {}:{} action should be an object",
                     button_press.remote_name, button_press.button_name
                 )
             })?;
@@ -103,14 +103,14 @@ fn handle_button_press(config: &Config, button_press: &ButtonPress) -> Result<()
                 .get("type")
                 .ok_or_else(|| {
                     format!(
-                        "button {}:{} unisonhtAction should have 'type'",
+                        "button {}:{} action should have 'type'",
                         button_press.remote_name, button_press.button_name
                     )
                 })?
                 .as_str()
                 .ok_or_else(|| {
                     format!(
-                        "button {}:{} unisonhtAction should have string 'type'",
+                        "button {}:{} action should have string 'type'",
                         button_press.remote_name, button_press.button_name
                     )
                 })?;
