@@ -1,31 +1,32 @@
-#[macro_use]
-extern crate rocket;
-
-use clap::App;
+use actix_web;
+use actix_web::{get, post, web, HttpResponse, HttpServer, Responder};
+use clap;
 use clap::Arg;
 use log::{error, info};
 use raspberry_pi_ir_hat::Config;
+use raspberry_pi_ir_hat::CurrentChannel;
 use raspberry_pi_ir_hat::{ButtonPress, Hat, HatError, HatMessage};
-use rocket::http::ContentType;
-use rocket::response::Responder;
-use rocket::State;
+use serde::{Deserialize, Serialize};
 use simple_logger::SimpleLogger;
+use std::collections::HashMap;
+use std::env;
+use std::process;
+use std::sync::Arc;
 use std::sync::Mutex;
 
-struct MyState {
-    hat: Mutex<Hat>,
+#[derive(Clone)]
+pub struct AppState {
+    hat: Arc<Mutex<Hat>>,
 }
 
-#[derive(Responder)]
-enum MyResponse {
-    #[response(status = 200)]
-    Ok(String, ContentType),
-    #[response(status = 404)]
-    NotFound(String),
-    #[response(status = 408)]
-    Timeout(String),
-    #[response(status = 500)]
-    ServerError(String),
+#[derive(Serialize, Deserialize)]
+pub struct GetStatusResponse {
+    pub devices: HashMap<String, GetStatusResponseDevice>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct GetStatusResponseDevice {
+    pub milliamps: u32,
 }
 
 static INDEX_HTML: &str = include_str!("static/index.html");
@@ -35,48 +36,116 @@ static SWAGGER_HTML: &str = include_str!("static/swagger.html");
 static SWAGGER_JSON: &str = include_str!("static/swagger.json");
 
 #[get("/")]
-fn index_html() -> (ContentType, &'static str) {
-    return (ContentType::HTML, INDEX_HTML);
+pub async fn index_html() -> impl Responder {
+    return HttpResponse::Ok()
+        .content_type("text/html")
+        .body(INDEX_HTML);
 }
 
 #[get("/swagger.html")]
-fn swagger_html() -> (ContentType, &'static str) {
-    return (ContentType::HTML, SWAGGER_HTML);
+pub async fn swagger_html() -> impl Responder {
+    return HttpResponse::Ok()
+        .content_type("text/html")
+        .body(SWAGGER_HTML);
 }
 
 #[get("/swagger.json")]
-fn swagger_json() -> (ContentType, &'static str) {
-    return (ContentType::JSON, SWAGGER_JSON);
+pub async fn swagger_json() -> impl Responder {
+    return HttpResponse::Ok()
+        .content_type("application/json")
+        .body(SWAGGER_JSON);
 }
 
 #[get("/api/v1/config")]
-fn get_config(state: &State<MyState>) -> MyResponse {
-    return match state.hat.lock() {
-        Result::Err(err) => MyResponse::ServerError(format!("failed to lock: {}", err)),
+async fn get_config(state: web::Data<AppState>) -> impl Responder {
+    match state.hat.lock() {
+        Result::Err(err) => {
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
         Result::Ok(hat) => match hat.get_config().to_json_string() {
-            Result::Err(err) => MyResponse::ServerError(format!("{}", err)),
-            Result::Ok(config_json) => MyResponse::Ok(config_json, ContentType::JSON),
+            Result::Err(err) => {
+                error!("get config error {}", err);
+                return HttpResponse::InternalServerError().finish();
+            }
+            Result::Ok(config_json) => {
+                return HttpResponse::Ok().json(config_json);
+            }
         },
     };
 }
 
+#[get("/api/v1/status")]
+async fn get_status(state: web::Data<AppState>) -> impl Responder {
+    match state.hat.lock() {
+        Result::Err(err) => {
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(mut hat) => {
+            let mut devices: HashMap<String, GetStatusResponseDevice> = HashMap::new();
+            for ch in [CurrentChannel::Channel0, CurrentChannel::Channel1] {
+                match hat.get_current(ch) {
+                    Result::Err(err) => match err {
+                        HatError::Timeout(err) => {
+                            error!("timeout {}", err);
+                            return HttpResponse::RequestTimeout().finish();
+                        }
+                        _ => {
+                            error!("transmit error {}", err);
+                            return HttpResponse::InternalServerError().finish();
+                        }
+                    },
+                    Result::Ok(resp) => {
+                        let device_name = match ch {
+                            CurrentChannel::Channel0 => "device0",
+                            CurrentChannel::Channel1 => "device1",
+                        };
+                        devices.insert(
+                            device_name.to_string(),
+                            GetStatusResponseDevice {
+                                milliamps: resp.milliamps,
+                            },
+                        );
+                    }
+                }
+            }
+            return HttpResponse::Ok().json(GetStatusResponse { devices });
+        }
+    };
+}
+
 #[post("/api/v1/transmit/<remote_name>/<button_name>")]
-fn transmit(state: &State<MyState>, remote_name: &str, button_name: &str) -> MyResponse {
-    return match state.hat.lock() {
-        Result::Err(err) => MyResponse::ServerError(format!("failed to lock: {}", err)),
-        Result::Ok(mut hat) => match hat.transmit(remote_name, button_name) {
+async fn transmit(
+    state: web::Data<AppState>,
+    web::Path((remote_name, button_name)): web::Path<(String, String)>,
+) -> impl Responder {
+    match state.hat.lock() {
+        Result::Err(err) => {
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(mut hat) => match hat.transmit(&remote_name, &button_name) {
             Result::Err(err) => match err {
                 HatError::InvalidButton {
                     remote_name,
                     button_name,
-                } => MyResponse::NotFound(format!(
-                    "button not found {}:{}",
-                    remote_name, button_name
-                )),
-                HatError::Timeout(err) => MyResponse::Timeout(format!("{}", err)),
-                _ => MyResponse::ServerError(format!("{}", err)),
+                } => {
+                    error!("button not found {}:{}", remote_name, button_name);
+                    return HttpResponse::NotFound().finish();
+                }
+                HatError::Timeout(err) => {
+                    error!("timeout {}", err);
+                    return HttpResponse::RequestTimeout().finish();
+                }
+                _ => {
+                    error!("transmit error {}", err);
+                    return HttpResponse::InternalServerError().finish();
+                }
             },
-            Result::Ok(_) => MyResponse::Ok("{}".to_string(), ContentType::JSON),
+            Result::Ok(_) => {
+                return HttpResponse::Ok().json({});
+            }
         },
     };
 }
@@ -164,7 +233,7 @@ fn init() -> std::result::Result<Hat, String> {
         .init()
         .map_err(|err| format!("{}", err))?;
 
-    let args = App::new("UnisonHT - Raspberry Pi IrHat")
+    let args = clap::App::new("UnisonHT - Raspberry Pi IrHat")
         .version("1.0.0")
         .author("Joe Ferner <joe@fernsroth.com>")
         .about("UnisonHT Raspberry Pi IrHat web server")
@@ -234,20 +303,34 @@ fn init() -> std::result::Result<Hat, String> {
     return Result::Ok(hat);
 }
 
-#[launch]
-fn rocket() -> _ {
+#[actix_web::main]
+async fn main() -> std::io::Result<()> {
     match init() {
         Result::Err(err) => {
             error!("{}", err);
             std::process::exit(1);
         }
-        Result::Ok(hat) => rocket::build()
-            .manage(MyState {
-                hat: Mutex::new(hat),
+        Result::Ok(hat) => {
+            let bind = format!(
+                "{}:{}",
+                env::var("HOST").unwrap_or("0.0.0.0".to_string()),
+                env::var("PORT").unwrap_or("8080".to_string())
+            );
+            let hat = Arc::new(Mutex::new(hat));
+            let http = HttpServer::new(move || {
+                let data = AppState { hat: hat.clone() };
+                actix_web::App::new()
+                    .data(data)
+                    .service(index_html)
+                    .service(swagger_html)
+                    .service(swagger_json)
+                    .service(get_config)
+                    .service(transmit)
             })
-            .mount(
-                "/",
-                routes![index_html, swagger_html, swagger_json, get_config, transmit],
-            ),
+            .bind(bind.clone())?
+            .run();
+            info!("listening http://{}", bind);
+            return http.await;
+        }
     }
 }
