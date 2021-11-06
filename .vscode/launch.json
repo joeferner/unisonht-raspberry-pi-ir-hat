@@ -19,12 +19,10 @@
                     "kind": "bin"
                 }
             },
-            "args": [
-                "--config",
-                "example.config.json",
-                "--port",
-                "/dev/pts/6"
-            ],
+            "env": {
+                "HAT_CONFIG": "example.config.json",
+                "HAT_PORT": "/dev/pts/4"
+            },
             "cwd": "${workspaceFolder}"
         },
         {
