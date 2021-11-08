@@ -75,7 +75,7 @@ fn handle_mqtt_message(
     topic: &str,
     payload: &str,
 ) -> Result<(), String> {
-    let prefix = get_topic_prefix();
+    let prefix = get_topic_prefix(client);
     if !topic.starts_with(&prefix) {
         return Result::Err(format!("topic must start with: {}", prefix));
     }
@@ -92,7 +92,7 @@ fn handle_mqtt_message_transmit(
 ) -> Result<(), String> {
     let message: TransmitMessage = serde_json::from_str(payload)
         .map_err(|err| format!("invalid transmit message: {}", err))?;
-    match get_app_state(client).hat.as_ref().unwrap().lock() {
+    match get_hat(client).lock() {
         Result::Err(err) => {
             // cannot recover from a bad lock
             error!("failed to lock {}", err);
@@ -270,7 +270,7 @@ fn init_hat(app_state: &AppState) -> std::result::Result<Hat, String> {
 
 fn mqtt_on_connect_success(client: &paho_mqtt::AsyncClient, _msg_id: u16) {
     info!("mqtt connected");
-    let topic_pattern = get_app_state(client).topic_prefix.clone() + "#";
+    let topic_pattern = get_topic_prefix(client) + "#";
     client.subscribe(topic_pattern, paho_mqtt::QOS_1);
 }
 
@@ -280,7 +280,7 @@ fn mqtt_on_connect_failure(client: &paho_mqtt::AsyncClient, _msg_id: u16, rc: i3
     client.reconnect_with_callbacks(mqtt_on_connect_success, mqtt_on_connect_failure);
 }
 
-fn init_mqtt(app_state: &AppState) -> Result<paho_mqtt::AsyncClient, paho_mqtt::Error> {
+fn init_mqtt(app_state: Arc<Mutex<AppState>>) -> Result<paho_mqtt::AsyncClient, paho_mqtt::Error> {
     let mqtt_uri = env::var("MQTT_URI").unwrap_or("tcp://localhost:1883".to_string());
     let mqtt_client_id = env::var("MQTT_CLIENT_ID").unwrap_or("raspirhat".to_string());
     let create_opts = paho_mqtt::CreateOptionsBuilder::new()
@@ -327,36 +327,44 @@ fn init_mqtt(app_state: &AppState) -> Result<paho_mqtt::AsyncClient, paho_mqtt::
     return Result::Ok(mqtt_client);
 }
 
-fn get_topic_prefix() -> String {
-    let mut topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or("ir/".to_string());
-    if !topic_prefix.ends_with("/") {
-        topic_prefix = topic_prefix + "/";
-    }
-    return topic_prefix;
-}
-
-fn get_app_state(client: &paho_mqtt::AsyncClient) -> &AppState {
+fn get_app_state(client: &paho_mqtt::AsyncClient) -> &Arc<Mutex<AppState>> {
     return client
         .user_data()
         .unwrap()
-        .downcast_ref::<AppState>()
+        .downcast_ref::<Arc<Mutex<AppState>>>()
         .unwrap();
 }
 
-fn get_status_topic(app_state: &AppState) -> String {
-    match app_state.mqtt_client.as_ref().unwrap().lock() {
+fn get_topic_prefix(client: &paho_mqtt::AsyncClient) -> String {
+    match get_app_state(client).lock() {
         Result::Err(err) => {
-            // cannot recover from a bad lock
+            // need to exit here since there is no recovering from a broken lock
             error!("failed to lock {}", err);
             process::exit(1);
         }
-        Result::Ok(client) => {
-            return get_app_state(&client).topic_prefix.clone() + "status";
-        }
-    }
+        Result::Ok(app_state) => return app_state.topic_prefix.clone(),
+    };
 }
 
-fn init() -> Result<AppState, String> {
+fn get_hat(client: &paho_mqtt::AsyncClient) -> Arc<Mutex<Hat>> {
+    match get_app_state(client).lock() {
+        Result::Err(err) => {
+            // need to exit here since there is no recovering from a broken lock
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(app_state) => return app_state.hat.as_ref().unwrap().clone(),
+    };
+}
+
+fn init() -> Result<Arc<Mutex<AppState>>, String> {
+    fn get_topic_prefix() -> String {
+        let mut topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or("ir/".to_string());
+        if !topic_prefix.ends_with("/") {
+            topic_prefix = topic_prefix + "/";
+        }
+        return topic_prefix;
+    }
     let mut app_state = AppState {
         hat: Option::None,
         mqtt_client: Option::None,
@@ -364,8 +372,19 @@ fn init() -> Result<AppState, String> {
     };
     let hat = init_hat(&app_state).map_err(|err| format!("init hat error: {}", err))?;
     app_state.hat = Option::Some(Arc::new(Mutex::new(hat)));
-    let mqtt_client = init_mqtt(&app_state).map_err(|err| format!("init mqtt error: {}", err))?;
-    app_state.mqtt_client = Option::Some(Arc::new(Mutex::new(mqtt_client)));
+    let app_state = Arc::new(Mutex::new(app_state));
+    let mqtt_client =
+        init_mqtt(app_state.clone()).map_err(|err| format!("init mqtt error: {}", err))?;
+    match app_state.lock() {
+        Result::Err(err) => {
+            // need to exit here since there is no recovering from a broken lock
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(mut app_state) => {
+            app_state.mqtt_client = Option::Some(Arc::new(Mutex::new(mqtt_client)));
+        }
+    }
     return Result::Ok(app_state);
 }
 
@@ -377,8 +396,18 @@ fn main() -> Result<(), String> {
         }
         Result::Ok(app_state) => {
             info!("started");
-            let status_topic = get_status_topic(&app_state);
-            let mqtt_client_mutex = app_state.mqtt_client.unwrap();
+            let (status_topic, mqtt_client_mutex) = match app_state.lock() {
+                Result::Err(err) => {
+                    // need to exit here since there is no recovering from a broken lock
+                    error!("failed to lock {}", err);
+                    process::exit(1);
+                }
+                Result::Ok(app_state) => {
+                    let status_topic = app_state.topic_prefix.clone() + "status";
+                    let mqtt_client_mutex = app_state.mqtt_client.as_ref().unwrap().clone();
+                    (status_topic, mqtt_client_mutex)
+                }
+            };
             loop {
                 thread::sleep(Duration::from_secs(60));
                 match mqtt_client_mutex.lock() {
@@ -399,7 +428,7 @@ fn main() -> Result<(), String> {
 }
 
 fn send_status_message(client: &paho_mqtt::AsyncClient, topic: &str) -> Result<(), String> {
-    match get_app_state(client).hat.as_ref().unwrap().lock() {
+    match get_hat(client).lock() {
         Result::Err(err) => {
             // need to exit here since there is no recovering from a broken lock
             error!("failed to lock {}", err);
