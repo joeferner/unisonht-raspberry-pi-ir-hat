@@ -1,6 +1,4 @@
-use futures;
-use futures::executor::block_on;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use paho_mqtt;
 use raspberry_pi_ir_hat::Config;
 use raspberry_pi_ir_hat::CurrentChannel;
@@ -9,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use simple_logger::SimpleLogger;
 use std::collections::HashMap;
 use std::env;
+use std::fs;
 use std::process;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -17,185 +16,233 @@ use std::time::Duration;
 
 #[derive(Clone)]
 pub struct AppState {
-    hat: Arc<Mutex<Hat>>,
+    hat: Option<Arc<Mutex<Hat>>>,
+    mqtt_client: Option<Arc<Mutex<paho_mqtt::AsyncClient>>>,
+    topic_prefix: String,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnisonConfig {
+    remotes: HashMap<String, UnisonConfigRemote>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnisonConfigRemote {
+    buttons: HashMap<String, UnisonConfigButton>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnisonConfigButton {
+    action: Option<UnisonConfigAction>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnisonConfigAction {
+    #[serde(rename = "type")]
+    action_type: String,
+
+    // type: http
+    url: Option<String>,
+
+    // type: http
+    method: Option<String>,
+
+    // type: mqtt
+    topic: Option<String>,
+
+    // type: mqtt
+    payload: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetStatusResponse {
-    pub devices: HashMap<String, GetStatusResponseDevice>,
+pub struct StatusMessage {
+    pub devices: HashMap<String, StatusMessageDevice>,
 }
 
 #[derive(Serialize, Deserialize)]
-pub struct GetStatusResponseDevice {
+pub struct StatusMessageDevice {
     pub milliamps: u32,
 }
 
-// #[get("/api/v1/status")]
-// async fn get_status(state: web::Data<AppState>) -> impl Responder {
-//     match state.hat.lock() {
-//         Result::Err(err) => {
-//             error!("failed to lock {}", err);
-//             process::exit(1);
-//         }
-//         Result::Ok(mut hat) => {
-//             let mut devices: HashMap<String, GetStatusResponseDevice> = HashMap::new();
-//             for ch in [CurrentChannel::Channel0, CurrentChannel::Channel1] {
-//                 match hat.get_current(ch) {
-//                     Result::Err(err) => match err {
-//                         HatError::Timeout(err) => {
-//                             error!("timeout {}", err);
-//                             return HttpResponse::RequestTimeout().finish();
-//                         }
-//                         _ => {
-//                             error!("transmit error {}", err);
-//                             return HttpResponse::InternalServerError().finish();
-//                         }
-//                     },
-//                     Result::Ok(resp) => {
-//                         let device_name = match ch {
-//                             CurrentChannel::Channel0 => "device0",
-//                             CurrentChannel::Channel1 => "device1",
-//                         };
-//                         devices.insert(
-//                             device_name.to_string(),
-//                             GetStatusResponseDevice {
-//                                 milliamps: resp.milliamps,
-//                             },
-//                         );
-//                     }
-//                 }
-//             }
-//             return HttpResponse::Ok().json(GetStatusResponse { devices });
-//         }
-//     };
-// }
+#[derive(Serialize, Deserialize)]
+pub struct TransmitMessage {
+    remote_name: String,
+    button_name: String,
+}
 
-// #[post("/api/v1/transmit/<remote_name>/<button_name>")]
-// async fn transmit(
-//     state: web::Data<AppState>,
-//     web::Path((remote_name, button_name)): web::Path<(String, String)>,
-// ) -> impl Responder {
-//     match state.hat.lock() {
-//         Result::Err(err) => {
-//             error!("failed to lock {}", err);
-//             process::exit(1);
-//         }
-//         Result::Ok(mut hat) => match hat.transmit(&remote_name, &button_name) {
-//             Result::Err(err) => match err {
-//                 HatError::InvalidButton {
-//                     remote_name,
-//                     button_name,
-//                 } => {
-//                     error!("button not found {}:{}", remote_name, button_name);
-//                     return HttpResponse::NotFound().finish();
-//                 }
-//                 HatError::Timeout(err) => {
-//                     error!("timeout {}", err);
-//                     return HttpResponse::RequestTimeout().finish();
-//                 }
-//                 _ => {
-//                     error!("transmit error {}", err);
-//                     return HttpResponse::InternalServerError().finish();
-//                 }
-//             },
-//             Result::Ok(_) => {
-//                 return HttpResponse::Ok().json({});
-//             }
-//         },
-//     };
-// }
+fn handle_mqtt_message(
+    client: &paho_mqtt::AsyncClient,
+    topic: &str,
+    payload: &str,
+) -> Result<(), String> {
+    let prefix = get_topic_prefix();
+    if !topic.starts_with(&prefix) {
+        return Result::Err(format!("topic must start with: {}", prefix));
+    }
+    let topic_part = &topic[prefix.len()..];
+    return match topic_part {
+        "tx" => handle_mqtt_message_transmit(client, payload),
+        _ => Result::Err(format!("unhandled topic for incoming message: {}", topic)),
+    };
+}
 
-// fn handle_button_press(config: &Config, button_press: &ButtonPress) -> Result<(), String> {
-//     let button = config
-//         .get_button(&button_press.remote_name, &button_press.button_name)
-//         .ok_or_else(|| {
-//             format!(
-//                 "could not find button {}:{}",
-//                 button_press.remote_name, button_press.button_name
-//             )
-//         })?;
-//     match button.get_json().get("action") {
-//         Option::None => return Result::Ok(()),
-//         Option::Some(action_value) => {
-//             let action = action_value.as_object().ok_or_else(|| {
-//                 format!(
-//                     "button {}:{} action should be an object",
-//                     button_press.remote_name, button_press.button_name
-//                 )
-//             })?;
-//             let action_type = action
-//                 .get("type")
-//                 .ok_or_else(|| {
-//                     format!(
-//                         "button {}:{} action should have 'type'",
-//                         button_press.remote_name, button_press.button_name
-//                     )
-//                 })?
-//                 .as_str()
-//                 .ok_or_else(|| {
-//                     format!(
-//                         "button {}:{} action should have string 'type'",
-//                         button_press.remote_name, button_press.button_name
-//                     )
-//                 })?;
-//             match action_type {
-//                 "http" => {
-//                     return do_http_action(&action).map_err(|err| {
-//                         format!(
-//                             "error executing action {}:{}: {}",
-//                             button_press.remote_name, button_press.button_name, err
-//                         )
-//                     });
-//                 }
-//                 _ => {
-//                     return Result::Err(format!(
-//                         "button {}:{} has invalid type: {}",
-//                         button_press.remote_name, button_press.button_name, action_type
-//                     ));
-//                 }
-//             }
-//         }
-//     }
-// }
+fn handle_mqtt_message_transmit(
+    client: &paho_mqtt::AsyncClient,
+    payload: &str,
+) -> Result<(), String> {
+    let message: TransmitMessage = serde_json::from_str(payload)
+        .map_err(|err| format!("invalid transmit message: {}", err))?;
+    match get_app_state(client).hat.as_ref().unwrap().lock() {
+        Result::Err(err) => {
+            // cannot recover from a bad lock
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(mut hat) => match hat.transmit(&message.remote_name, &message.button_name) {
+            Result::Err(err) => match err {
+                HatError::InvalidButton {
+                    remote_name,
+                    button_name,
+                } => {
+                    return Result::Err(format!(
+                        "button not found {}:{}",
+                        remote_name, button_name
+                    ));
+                }
+                HatError::Timeout(err) => {
+                    return Result::Err(format!("timeout {}", err));
+                }
+                _ => {
+                    return Result::Err(format!("transmit error {}", err));
+                }
+            },
+            Result::Ok(_) => {
+                return Result::Ok(());
+            }
+        },
+    };
+}
 
-// fn do_http_action(action: &serde_json::Map<String, serde_json::Value>) -> Result<(), String> {
-//     let url = action
-//         .get("url")
-//         .ok_or_else(|| format!("'http' actions should have a url"))?
-//         .as_str()
-//         .ok_or_else(|| format!("'http' actions should have a string url"))?;
-//     let method = match action.get("method") {
-//         Option::None => Result::Ok("post".to_string()),
-//         Option::Some(method_value) => match method_value.as_str() {
-//             Option::None => Result::Err(format!("'http' actions should have a string url")),
-//             Option::Some(m) => Result::Ok(m.to_lowercase()),
-//         },
-//     }?;
-//     info!("calling {} {}", method, url);
-//     let response = match method.as_ref() {
-//         "get" => ureq::get(url).call(),
-//         "post" => ureq::post(url).call(),
-//         _ => return Result::Err(format!("unexpected http method: {}", method)),
-//     };
-//     return match response {
-//         Result::Ok(_) => Result::Ok(()),
-//         Result::Err(err) => Result::Err(format!("failed to call: {} {}: {}", method, url, err)),
-//     };
-// }
+fn handle_button_press(
+    app_state: &AppState,
+    config: &UnisonConfig,
+    button_press: &ButtonPress,
+) -> Result<(), String> {
+    let remote = config.remotes.get(&button_press.remote_name);
+    if remote.is_none() {
+        return Result::Ok(());
+    }
+    let remote = remote.unwrap();
+    let button = remote.buttons.get(&button_press.button_name);
+    if button.is_none() {
+        return Result::Ok(());
+    }
+    let button = button.unwrap();
+    if button.action.is_none() {
+        return Result::Ok(());
+    }
+    let action = button.action.as_ref().unwrap();
+    let action_type: &str = &action.action_type;
+    match action_type {
+        "http" => {
+            return do_http_action(&action).map_err(|err| {
+                format!(
+                    "error executing action {}:{}: {}",
+                    button_press.remote_name, button_press.button_name, err
+                )
+            });
+        }
+        "mqtt" => match app_state.mqtt_client.as_ref().unwrap().lock() {
+            Result::Err(err) => {
+                // need to exit here since there is no recovering from a broken lock
+                error!("failed to lock {}", err);
+                process::exit(1);
+            }
+            Result::Ok(mqtt_client) => {
+                return do_mqtt_action(&mqtt_client, &action).map_err(|err| {
+                    format!(
+                        "error executing action {}:{}: {}",
+                        button_press.remote_name, button_press.button_name, err
+                    )
+                });
+            }
+        },
+        _ => {
+            return Result::Err(format!(
+                "button {}:{} has invalid type: {}",
+                button_press.remote_name, button_press.button_name, action_type
+            ));
+        }
+    }
+}
 
-fn init_hat() -> std::result::Result<Hat, String> {
+fn do_http_action(action: &UnisonConfigAction) -> Result<(), String> {
+    let default_method = "post".to_string();
+    let url = action
+        .url
+        .as_ref()
+        .ok_or_else(|| format!("'http' actions require a url"))?;
+    let method = action
+        .method
+        .as_ref()
+        .unwrap_or(&default_method)
+        .to_lowercase();
+    info!("calling {} {}", method, url);
+    let response = match method.as_ref() {
+        "get" => ureq::get(&url).call(),
+        "post" => ureq::post(&url).call(),
+        _ => return Result::Err(format!("unexpected http method: {}", method)),
+    };
+    return match response {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(err) => Result::Err(format!("failed to call: {} {}: {}", method, url, err)),
+    };
+}
+
+fn do_mqtt_action(
+    client: &paho_mqtt::AsyncClient,
+    action: &UnisonConfigAction,
+) -> Result<(), String> {
+    let topic = action
+        .topic
+        .as_ref()
+        .ok_or_else(|| format!("'mqtt' actions require a topic"))?;
+    let payload = action
+        .payload
+        .as_ref()
+        .ok_or_else(|| format!("'mqtt' actions require a payload"))?
+        .clone();
+
+    let message = paho_mqtt::Message::new(topic, payload, paho_mqtt::QOS_1);
+    client
+        .publish(message)
+        .wait()
+        .map_err(|err| format!("mqtt publish failed: {}", err))?;
+    return Result::Ok(());
+}
+
+fn init_hat(app_state: &AppState) -> std::result::Result<Hat, String> {
     SimpleLogger::new()
         .init()
         .map_err(|err| format!("{}", err))?;
 
-    let config_filename = env::var("HAT_CONFIG").unwrap_or("./config.yaml".to_string());
-    let config = Config::read(&config_filename, false)
-        .map_err(|err| format!("failed to read config {}", err))?;
+    let config_filename: &str = &env::var("HAT_CONFIG").unwrap_or("./config.yaml".to_string());
+    let config_text = fs::read_to_string(config_filename)
+        .map_err(|err| format!("failed to read file: {}: {}", config_filename, err))?;
+    let config =
+        Config::from_str(&config_text).map_err(|err| format!("failed to read config {}", err))?;
     let port = env::var("HAT_PORT").unwrap_or("/dev/serial0".to_string());
     let tolerance_string = env::var("HAT_TOLERANCE").unwrap_or("0.15".to_string());
     let tolerance = tolerance_string
         .parse::<f32>()
         .map_err(|err| format!("invalid tolerance: {} ({})", tolerance_string, err))?;
+    let unison_config: UnisonConfig = serde_yaml::from_str(&config_text).map_err(|err| {
+        format!(
+            "could not read config: contained invalid yaml values: {}",
+            err
+        )
+    })?;
+    let hat_app_state = app_state.clone();
     let mut hat = Hat::new(
         config,
         &port,
@@ -203,10 +250,11 @@ fn init_hat() -> std::result::Result<Hat, String> {
         Box::new(move |message| {
             match message {
                 HatMessage::ButtonPress(button_press) => {
-                    // TODO
-                    // if let Result::Err(err) = handle_button_press(&callback_config, &button_press) {
-                    //     error!("{}", err);
-                    // }
+                    if let Result::Err(err) =
+                        handle_button_press(&hat_app_state, &unison_config, &button_press)
+                    {
+                        error!("{}", err);
+                    }
                 }
                 HatMessage::Error(err) => {
                     error!("{:#?}", err);
@@ -222,7 +270,8 @@ fn init_hat() -> std::result::Result<Hat, String> {
 
 fn mqtt_on_connect_success(client: &paho_mqtt::AsyncClient, _msg_id: u16) {
     info!("mqtt connected");
-    client.subscribe(format!("ir/#"), paho_mqtt::QOS_1);
+    let topic_pattern = get_app_state(client).topic_prefix.clone() + "#";
+    client.subscribe(topic_pattern, paho_mqtt::QOS_1);
 }
 
 fn mqtt_on_connect_failure(client: &paho_mqtt::AsyncClient, _msg_id: u16, rc: i32) {
@@ -231,7 +280,7 @@ fn mqtt_on_connect_failure(client: &paho_mqtt::AsyncClient, _msg_id: u16, rc: i3
     client.reconnect_with_callbacks(mqtt_on_connect_success, mqtt_on_connect_failure);
 }
 
-fn init_mqtt(app_state: AppState) -> Result<paho_mqtt::AsyncClient, paho_mqtt::Error> {
+fn init_mqtt(app_state: &AppState) -> Result<paho_mqtt::AsyncClient, paho_mqtt::Error> {
     let mqtt_uri = env::var("MQTT_URI").unwrap_or("tcp://localhost:1883".to_string());
     let mqtt_client_id = env::var("MQTT_CLIENT_ID").unwrap_or("raspirhat".to_string());
     let create_opts = paho_mqtt::CreateOptionsBuilder::new()
@@ -251,7 +300,10 @@ fn init_mqtt(app_state: AppState) -> Result<paho_mqtt::AsyncClient, paho_mqtt::E
         if let Option::Some(message) = message {
             let topic = message.topic();
             let payload_str = message.payload_str();
-            println!("{} - {}", topic, payload_str);
+            handle_mqtt_message(client, topic, &payload_str).unwrap_or_else(|err| {
+                warn!("{}", err);
+                debug!("payload: {}", payload_str);
+            });
         }
     });
 
@@ -275,28 +327,119 @@ fn init_mqtt(app_state: AppState) -> Result<paho_mqtt::AsyncClient, paho_mqtt::E
     return Result::Ok(mqtt_client);
 }
 
-fn init() -> Result<paho_mqtt::AsyncClient, String> {
-    let hat = init_hat().map_err(|err| format!("init hat error: {}", err))?;
-    let app_state = AppState {
-        hat: Arc::new(Mutex::new(hat)),
+fn get_topic_prefix() -> String {
+    let mut topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or("ir/".to_string());
+    if !topic_prefix.ends_with("/") {
+        topic_prefix = topic_prefix + "/";
+    }
+    return topic_prefix;
+}
+
+fn get_app_state(client: &paho_mqtt::AsyncClient) -> &AppState {
+    return client
+        .user_data()
+        .unwrap()
+        .downcast_ref::<AppState>()
+        .unwrap();
+}
+
+fn get_status_topic(app_state: &AppState) -> String {
+    match app_state.mqtt_client.as_ref().unwrap().lock() {
+        Result::Err(err) => {
+            // cannot recover from a bad lock
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(client) => {
+            return get_app_state(&client).topic_prefix.clone() + "status";
+        }
+    }
+}
+
+fn init() -> Result<AppState, String> {
+    let mut app_state = AppState {
+        hat: Option::None,
+        mqtt_client: Option::None,
+        topic_prefix: get_topic_prefix(),
     };
-    let mqtt_client = init_mqtt(app_state).map_err(|err| format!("init mqtt error: {}", err))?;
-    return Result::Ok(mqtt_client);
+    let hat = init_hat(&app_state).map_err(|err| format!("init hat error: {}", err))?;
+    app_state.hat = Option::Some(Arc::new(Mutex::new(hat)));
+    let mqtt_client = init_mqtt(&app_state).map_err(|err| format!("init mqtt error: {}", err))?;
+    app_state.mqtt_client = Option::Some(Arc::new(Mutex::new(mqtt_client)));
+    return Result::Ok(app_state);
 }
 
 fn main() -> Result<(), String> {
     match init() {
         Result::Err(err) => {
-            error!("{}", err);
+            error!("init failed: {}", err);
             process::exit(1);
         }
-        Result::Ok(mqtt_client) => {
+        Result::Ok(app_state) => {
             info!("started");
+            let status_topic = get_status_topic(&app_state);
+            let mqtt_client_mutex = app_state.mqtt_client.unwrap();
             loop {
                 thread::sleep(Duration::from_secs(60));
-                let msg = paho_mqtt::Message::new("ir/status", "{}", paho_mqtt::QOS_1);
-                mqtt_client.publish(msg);
+                match mqtt_client_mutex.lock() {
+                    Result::Err(err) => {
+                        // cannot recover from a bad lock
+                        error!("failed to lock {}", err);
+                        process::exit(1);
+                    }
+                    Result::Ok(client) => {
+                        send_status_message(&client, &status_topic).unwrap_or_else(|err| {
+                            error!("failed to send status heartbeat: {}", err)
+                        });
+                    }
+                }
             }
+        }
+    }
+}
+
+fn send_status_message(client: &paho_mqtt::AsyncClient, topic: &str) -> Result<(), String> {
+    match get_app_state(client).hat.as_ref().unwrap().lock() {
+        Result::Err(err) => {
+            // need to exit here since there is no recovering from a broken lock
+            error!("failed to lock {}", err);
+            process::exit(1);
+        }
+        Result::Ok(mut hat) => {
+            let mut devices: HashMap<String, StatusMessageDevice> = HashMap::new();
+            for ch in [CurrentChannel::Channel0, CurrentChannel::Channel1] {
+                match hat.get_current(ch) {
+                    Result::Err(err) => match err {
+                        HatError::Timeout(err) => {
+                            return Result::Err(format!("timeout: {}", err));
+                        }
+                        _ => {
+                            return Result::Err(format!("transmit error {}", err));
+                        }
+                    },
+                    Result::Ok(resp) => {
+                        let device_name = match ch {
+                            CurrentChannel::Channel0 => "device0",
+                            CurrentChannel::Channel1 => "device1",
+                        };
+                        devices.insert(
+                            device_name.to_string(),
+                            StatusMessageDevice {
+                                milliamps: resp.milliamps,
+                            },
+                        );
+                    }
+                }
+            }
+            let status = StatusMessage { devices };
+            let status_string: String = serde_json::to_string(&status)
+                .map_err(|err| format!("could not convert status to json: {}", err))?;
+            let msg = paho_mqtt::Message::new(topic, status_string, paho_mqtt::QOS_1);
+            client
+                .publish(msg)
+                .wait()
+                .map_err(|err| format!("publish error: {}", err))?;
+            return Result::Ok(());
         }
     }
 }

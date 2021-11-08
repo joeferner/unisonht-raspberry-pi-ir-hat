@@ -10,3 +10,9 @@ socat -d -d pty,raw,echo=0 pty,raw,echo=0
 cargo run -- --file test.json --port /dev/pts/6
 printf '!s100\n!s200\n!s300\n' > /dev/pts/7
 ```
+
+# Transmit message
+
+```
+mosquitto_pub -t ir/tx -m '{"remote_name":"test1","button_name":"volumeUp"}'
+```
