@@ -1,45 +1,40 @@
 use crate::app_state::AppState;
 use crate::config::UnisonConfig;
 use crate::config::UnisonConfigDevice;
+use crate::config_env::ConfigEnv;
 use crate::hat::init_hat;
 use crate::message::StatusMessageDevice;
 use crate::mqtt::init_mqtt;
 use crate::mqtt::send_status_message;
 use log::{error, info};
 use raspberry_pi_ir_hat::Hat;
-use std::env;
 use std::fs;
 use std::process;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
-use std::time::Duration;
 
 mod action;
 mod app_state;
 mod config;
+mod config_env;
 mod hat;
 mod message;
 mod mqtt;
 
-fn init() -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfigDevice>), String> {
-    fn get_topic_prefix() -> String {
-        let mut topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or("ir/".to_string());
-        if !topic_prefix.ends_with("/") {
-            topic_prefix = topic_prefix + "/";
-        }
-        return topic_prefix;
-    }
-
-    let config_filename: &str = &env::var("HAT_CONFIG").unwrap_or("./config.yaml".to_string());
-    let config_text = fs::read_to_string(config_filename)
-        .map_err(|err| format!("failed to read file: {}: {}", config_filename, err))?;
+fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfigDevice>), String> {
+    let config_text = fs::read_to_string(&config_env.config_filename).map_err(|err| {
+        format!(
+            "failed to read file: {}: {}",
+            config_env.config_filename, err
+        )
+    })?;
     let unison_config = UnisonConfig::from_str(&config_text)?;
 
     let mut app_state = AppState {
         hat: Option::None,
         mqtt_client: Option::None,
-        topic_prefix: get_topic_prefix(),
+        topic_prefix: config_env.topic_prefix.clone(),
     };
 
     let hat =
@@ -62,11 +57,9 @@ fn init() -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfigDevice>), String> {
 }
 
 fn main() -> Result<(), String> {
-    let status_interval_str = env::var("STATUS_INTERVAL").unwrap_or("60".to_string());
-    let status_interval = status_interval_str
-        .parse::<u64>()
-        .map_err(|err| format!("invalid status interval: {} ({})", status_interval_str, err))?;
-    match init() {
+    let config_env = ConfigEnv::get()?;
+    let status_interval = config_env.status_interval;
+    match init(&config_env) {
         Result::Err(err) => {
             error!("init failed: {}", err);
             process::exit(1);
@@ -86,7 +79,7 @@ fn main() -> Result<(), String> {
                 }
             };
             loop {
-                thread::sleep(Duration::from_secs(status_interval));
+                thread::sleep(status_interval);
                 match mqtt_client_mutex.lock() {
                     Result::Err(err) => {
                         // cannot recover from a bad lock

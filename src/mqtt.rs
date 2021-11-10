@@ -1,6 +1,7 @@
 use crate::message::StatusMessage;
 use crate::message::TransmitMessage;
 use crate::AppState;
+use crate::ConfigEnv;
 use crate::Hat;
 use crate::StatusMessageDevice;
 use crate::UnisonConfigDevice;
@@ -9,7 +10,6 @@ use paho_mqtt;
 use raspberry_pi_ir_hat::CurrentChannel;
 use raspberry_pi_ir_hat::HatError;
 use std::collections::HashMap;
-use std::env;
 use std::process;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -28,17 +28,15 @@ fn mqtt_on_connect_failure(client: &paho_mqtt::AsyncClient, _msg_id: u16, rc: i3
     client.reconnect_with_callbacks(mqtt_on_connect_success, mqtt_on_connect_failure);
 }
 
-pub fn init_mqtt(
-    app_state: Arc<Mutex<AppState>>,
-) -> Result<paho_mqtt::AsyncClient, paho_mqtt::Error> {
-    let mqtt_uri = env::var("MQTT_URI").unwrap_or("tcp://localhost:1883".to_string());
-    let mqtt_client_id = env::var("MQTT_CLIENT_ID").unwrap_or("raspirhat".to_string());
+pub fn init_mqtt(app_state: Arc<Mutex<AppState>>) -> Result<paho_mqtt::AsyncClient, String> {
+    let config_env = ConfigEnv::get()?;
     let create_opts = paho_mqtt::CreateOptionsBuilder::new()
-        .server_uri(mqtt_uri)
-        .client_id(mqtt_client_id)
+        .server_uri(config_env.mqtt_uri)
+        .client_id(config_env.mqtt_client_id)
         .user_data(Box::new(app_state))
         .finalize();
-    let mut mqtt_client = paho_mqtt::AsyncClient::new(create_opts)?;
+    let mut mqtt_client = paho_mqtt::AsyncClient::new(create_opts)
+        .map_err(|err| format!("new mqtt client error {}", err))?;
 
     mqtt_client.set_connection_lost_callback(|client| {
         warn!("mqtt connection lost. reconnecting...");

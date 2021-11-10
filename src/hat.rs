@@ -1,30 +1,26 @@
 use crate::action::do_action;
 use crate::config::UnisonConfig;
 use crate::AppState;
+use crate::ConfigEnv;
 use log::error;
 use raspberry_pi_ir_hat::Config;
 use raspberry_pi_ir_hat::{ButtonPress, Hat, HatMessage};
 use simple_logger::SimpleLogger;
-use std::env;
 
 pub fn init_hat(app_state: &AppState, config_text: &str) -> std::result::Result<Hat, String> {
+    let env = ConfigEnv::get()?;
     SimpleLogger::new()
         .init()
         .map_err(|err| format!("{}", err))?;
 
     let config =
         Config::from_str(config_text).map_err(|err| format!("failed to read config {}", err))?;
-    let port = env::var("HAT_PORT").unwrap_or("/dev/serial0".to_string());
-    let tolerance_string = env::var("HAT_TOLERANCE").unwrap_or("0.15".to_string());
-    let tolerance = tolerance_string
-        .parse::<f32>()
-        .map_err(|err| format!("invalid tolerance: {} ({})", tolerance_string, err))?;
     let hat_app_state = app_state.clone();
     let unison_config = UnisonConfig::from_str(config_text)?;
     let mut hat = Hat::new(
         config,
-        &port,
-        tolerance,
+        &env.hat_port,
+        env.hat_tolerance,
         Box::new(move |message| {
             match message {
                 HatMessage::ButtonPress(button_press) => {
