@@ -20,7 +20,7 @@
                 }
             },
             "env": {
-                "HAT_CONFIG": "example.config.json",
+                "HAT_CONFIG": "example.config.yaml",
                 "HAT_PORT": "/dev/pts/4"
             },
             "cwd": "${workspaceFolder}"

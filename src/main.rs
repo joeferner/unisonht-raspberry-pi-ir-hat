@@ -15,7 +15,7 @@ use std::thread;
 use std::time::Duration;
 
 #[derive(Clone)]
-pub struct AppState {
+struct AppState {
     hat: Option<Arc<Mutex<Hat>>>,
     mqtt_client: Option<Arc<Mutex<paho_mqtt::AsyncClient>>>,
     topic_prefix: String,
@@ -23,35 +23,54 @@ pub struct AppState {
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnisonConfig {
-    remotes: HashMap<String, UnisonConfigRemote>,
+    pub remotes: HashMap<String, UnisonConfigRemote>,
+    pub devices: Vec<UnisonConfigDevice>,
+}
+
+impl UnisonConfig {
+    pub fn from_str(config_text: &str) -> Result<UnisonConfig, String> {
+        let unison_config: UnisonConfig = serde_yaml::from_str(config_text).map_err(|err| {
+            format!(
+                "could not read config: contained invalid yaml values: {}",
+                err
+            )
+        })?;
+        return Result::Ok(unison_config);
+    }
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnisonConfigRemote {
-    buttons: HashMap<String, UnisonConfigButton>,
+    pub buttons: HashMap<String, UnisonConfigButton>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnisonConfigButton {
-    action: Option<UnisonConfigAction>,
+    pub action: Option<UnisonConfigAction>,
 }
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnisonConfigAction {
     #[serde(rename = "type")]
-    action_type: String,
+    pub action_type: String,
 
     // type: http
-    url: Option<String>,
+    pub url: Option<String>,
 
     // type: http
-    method: Option<String>,
+    pub method: Option<String>,
 
     // type: mqtt
-    topic: Option<String>,
+    pub topic: Option<String>,
 
     // type: mqtt
-    payload: Option<String>,
+    pub payload: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnisonConfigDevice {
+    pub name: String,
+    pub on_threshold_milliamps: u32,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -62,6 +81,7 @@ pub struct StatusMessage {
 #[derive(Serialize, Deserialize)]
 pub struct StatusMessageDevice {
     pub milliamps: u32,
+    pub is_on: bool,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -221,28 +241,20 @@ fn do_mqtt_action(
     return Result::Ok(());
 }
 
-fn init_hat(app_state: &AppState) -> std::result::Result<Hat, String> {
+fn init_hat(app_state: &AppState, config_text: &str) -> std::result::Result<Hat, String> {
     SimpleLogger::new()
         .init()
         .map_err(|err| format!("{}", err))?;
 
-    let config_filename: &str = &env::var("HAT_CONFIG").unwrap_or("./config.yaml".to_string());
-    let config_text = fs::read_to_string(config_filename)
-        .map_err(|err| format!("failed to read file: {}: {}", config_filename, err))?;
     let config =
-        Config::from_str(&config_text).map_err(|err| format!("failed to read config {}", err))?;
+        Config::from_str(config_text).map_err(|err| format!("failed to read config {}", err))?;
     let port = env::var("HAT_PORT").unwrap_or("/dev/serial0".to_string());
     let tolerance_string = env::var("HAT_TOLERANCE").unwrap_or("0.15".to_string());
     let tolerance = tolerance_string
         .parse::<f32>()
         .map_err(|err| format!("invalid tolerance: {} ({})", tolerance_string, err))?;
-    let unison_config: UnisonConfig = serde_yaml::from_str(&config_text).map_err(|err| {
-        format!(
-            "could not read config: contained invalid yaml values: {}",
-            err
-        )
-    })?;
     let hat_app_state = app_state.clone();
+    let unison_config = UnisonConfig::from_str(config_text)?;
     let mut hat = Hat::new(
         config,
         &port,
@@ -357,7 +369,7 @@ fn get_hat(client: &paho_mqtt::AsyncClient) -> Arc<Mutex<Hat>> {
     };
 }
 
-fn init() -> Result<Arc<Mutex<AppState>>, String> {
+fn init() -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfigDevice>), String> {
     fn get_topic_prefix() -> String {
         let mut topic_prefix = env::var("MQTT_TOPIC_PREFIX").unwrap_or("ir/".to_string());
         if !topic_prefix.ends_with("/") {
@@ -365,12 +377,20 @@ fn init() -> Result<Arc<Mutex<AppState>>, String> {
         }
         return topic_prefix;
     }
+
+    let config_filename: &str = &env::var("HAT_CONFIG").unwrap_or("./config.yaml".to_string());
+    let config_text = fs::read_to_string(config_filename)
+        .map_err(|err| format!("failed to read file: {}: {}", config_filename, err))?;
+    let unison_config = UnisonConfig::from_str(&config_text)?;
+
     let mut app_state = AppState {
         hat: Option::None,
         mqtt_client: Option::None,
         topic_prefix: get_topic_prefix(),
     };
-    let hat = init_hat(&app_state).map_err(|err| format!("init hat error: {}", err))?;
+
+    let hat =
+        init_hat(&app_state, &config_text).map_err(|err| format!("init hat error: {}", err))?;
     app_state.hat = Option::Some(Arc::new(Mutex::new(hat)));
     let app_state = Arc::new(Mutex::new(app_state));
     let mqtt_client =
@@ -385,16 +405,20 @@ fn init() -> Result<Arc<Mutex<AppState>>, String> {
             app_state.mqtt_client = Option::Some(Arc::new(Mutex::new(mqtt_client)));
         }
     }
-    return Result::Ok(app_state);
+    return Result::Ok((app_state, unison_config.devices));
 }
 
 fn main() -> Result<(), String> {
+    let status_interval_str = env::var("STATUS_INTERVAL").unwrap_or("60".to_string());
+    let status_interval = status_interval_str
+        .parse::<u64>()
+        .map_err(|err| format!("invalid status interval: {} ({})", status_interval_str, err))?;
     match init() {
         Result::Err(err) => {
             error!("init failed: {}", err);
             process::exit(1);
         }
-        Result::Ok(app_state) => {
+        Result::Ok((app_state, device_configs)) => {
             info!("started");
             let (status_topic, mqtt_client_mutex) = match app_state.lock() {
                 Result::Err(err) => {
@@ -409,7 +433,7 @@ fn main() -> Result<(), String> {
                 }
             };
             loop {
-                thread::sleep(Duration::from_secs(60));
+                thread::sleep(Duration::from_secs(status_interval));
                 match mqtt_client_mutex.lock() {
                     Result::Err(err) => {
                         // cannot recover from a bad lock
@@ -417,9 +441,10 @@ fn main() -> Result<(), String> {
                         process::exit(1);
                     }
                     Result::Ok(client) => {
-                        send_status_message(&client, &status_topic).unwrap_or_else(|err| {
-                            error!("failed to send status heartbeat: {}", err)
-                        });
+                        send_status_message(&client, &status_topic, &device_configs)
+                            .unwrap_or_else(|err| {
+                                error!("failed to send status heartbeat: {}", err)
+                            });
                     }
                 }
             }
@@ -427,7 +452,11 @@ fn main() -> Result<(), String> {
     }
 }
 
-fn send_status_message(client: &paho_mqtt::AsyncClient, topic: &str) -> Result<(), String> {
+fn send_status_message(
+    client: &paho_mqtt::AsyncClient,
+    topic: &str,
+    device_configs: &Vec<UnisonConfigDevice>,
+) -> Result<(), String> {
     match get_hat(client).lock() {
         Result::Err(err) => {
             // need to exit here since there is no recovering from a broken lock
@@ -447,16 +476,19 @@ fn send_status_message(client: &paho_mqtt::AsyncClient, topic: &str) -> Result<(
                         }
                     },
                     Result::Ok(resp) => {
-                        let device_name = match ch {
-                            CurrentChannel::Channel0 => "device0",
-                            CurrentChannel::Channel1 => "device1",
+                        let device_config = match ch {
+                            CurrentChannel::Channel0 => device_configs.get(0),
+                            CurrentChannel::Channel1 => device_configs.get(1),
                         };
-                        devices.insert(
-                            device_name.to_string(),
-                            StatusMessageDevice {
-                                milliamps: resp.milliamps,
-                            },
-                        );
+                        if let Option::Some(device_config) = device_config {
+                            devices.insert(
+                                device_config.name.to_string(),
+                                StatusMessageDevice {
+                                    milliamps: resp.milliamps,
+                                    is_on: resp.milliamps > device_config.on_threshold_milliamps,
+                                },
+                            );
+                        }
                     }
                 }
             }
