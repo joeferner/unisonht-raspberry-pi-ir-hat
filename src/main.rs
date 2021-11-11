@@ -39,8 +39,7 @@ fn init(config_env: &ConfigEnv) -> Result<Arc<Mutex<AppState>>, String> {
 
     let hat =
         init_hat(&app_state, &config_text).map_err(|err| format!("init hat error: {}", err))?;
-    let mqtt_client =
-        init_mqtt(app_state.clone()).map_err(|err| format!("init mqtt error: {}", err))?;
+    let mqtt_client = init_mqtt(&app_state).map_err(|err| format!("init mqtt error: {}", err))?;
     match app_state.lock() {
         Result::Err(err) => {
             // need to exit here since there is no recovering from a broken lock

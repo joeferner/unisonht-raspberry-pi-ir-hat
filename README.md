@@ -32,6 +32,6 @@ cargo build
 cd ../../..
 git clone git@github.com:joeferner/unisonht-raspberry-pi-ir-hat.git
 cd unisonht-raspberry-pi-ir-hat/
-sudo apt-get install libssl-dev cmake
+sudo apt-get install libssl-dev cmake # do we need these?
 cargo build
 ```

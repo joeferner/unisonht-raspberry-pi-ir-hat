@@ -38,8 +38,8 @@ pub fn init_hat(
                             error!("failed to lock {}", err);
                             process::exit(1);
                         }
-                        Result::Ok(app_state) => {
-                            handle_button_press(&app_state, &unison_config, &button_press)
+                        Result::Ok(mut app_state) => {
+                            handle_button_press(&mut app_state, &unison_config, &button_press)
                         }
                     } {
                         error!("{}", err);
@@ -58,7 +58,7 @@ pub fn init_hat(
 }
 
 fn handle_button_press(
-    app_state: &AppState,
+    app_state: &mut AppState,
     config: &UnisonConfig,
     button_press: &ButtonPress,
 ) -> Result<(), String> {

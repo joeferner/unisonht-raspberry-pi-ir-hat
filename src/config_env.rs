@@ -8,6 +8,7 @@ pub struct ConfigEnv {
     pub hat_tolerance: f32,
     pub status_interval: Duration,
     pub mqtt_uri: String,
+    pub mqtt_port: u16,
     pub mqtt_client_id: String,
 }
 
@@ -19,7 +20,8 @@ impl ConfigEnv {
             hat_port: env::var("HAT_PORT").unwrap_or("/dev/serial0".to_string()),
             hat_tolerance: ConfigEnv::get_hat_tolerance()?,
             status_interval: ConfigEnv::get_status_interval()?,
-            mqtt_uri: env::var("MQTT_URI").unwrap_or("tcp://localhost:1883".to_string()),
+            mqtt_uri: env::var("MQTT_URI").unwrap_or("localhost".to_string()),
+            mqtt_port: ConfigEnv::get_mqtt_port()?,
             mqtt_client_id: env::var("MQTT_CLIENT_ID").unwrap_or("raspirhat".to_string()),
         });
     }
@@ -37,6 +39,13 @@ impl ConfigEnv {
         return tolerance_string
             .parse::<f32>()
             .map_err(|err| format!("invalid tolerance: {} ({})", tolerance_string, err));
+    }
+
+    fn get_mqtt_port() -> Result<u16, String> {
+        let port_string = env::var("MQTT_PORT").unwrap_or("1883".to_string());
+        return port_string
+            .parse::<u16>()
+            .map_err(|err| format!("invalid mqtt port: {} ({})", port_string, err));
     }
 
     fn get_status_interval() -> Result<Duration, String> {

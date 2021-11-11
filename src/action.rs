@@ -1,11 +1,9 @@
-use std::time::Duration;
-
 use crate::config::UnisonConfigAction;
 use crate::AppState;
 use log::debug;
-use paho_mqtt;
+use rumqttc::QoS;
 
-pub fn do_action(app_state: &AppState, action: &UnisonConfigAction) -> Result<(), String> {
+pub fn do_action(app_state: &mut AppState, action: &UnisonConfigAction) -> Result<(), String> {
     let action_type: &str = &action.action_type;
     match action_type {
         "http" => {
@@ -13,7 +11,7 @@ pub fn do_action(app_state: &AppState, action: &UnisonConfigAction) -> Result<()
         }
         "mqtt" => {
             return do_mqtt_action(
-                app_state.mqtt_client.as_ref().expect("mqtt_client not set"),
+                app_state.mqtt_client.as_mut().expect("mqtt_client not set"),
                 &action,
             );
         }
@@ -46,10 +44,7 @@ fn do_http_action(action: &UnisonConfigAction) -> Result<(), String> {
     };
 }
 
-fn do_mqtt_action(
-    client: &paho_mqtt::AsyncClient,
-    action: &UnisonConfigAction,
-) -> Result<(), String> {
+fn do_mqtt_action(client: &mut rumqttc::Client, action: &UnisonConfigAction) -> Result<(), String> {
     let topic = action
         .topic
         .as_ref()
@@ -61,10 +56,8 @@ fn do_mqtt_action(
         .clone();
     debug!("invoking action mqtt {}", topic);
 
-    let message = paho_mqtt::Message::new(topic, payload, paho_mqtt::QOS_0);
     client
-        .publish(message)
-        .wait_for(Duration::from_secs(1))
-        .map_err(|err| format!("mqtt publish failed: {}", err))?;
+        .publish(topic, QoS::AtLeastOnce, false, payload)
+        .map_err(|err| format!("error running action: {}", err))?;
     return Result::Ok(());
 }
