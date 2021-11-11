@@ -1,6 +1,7 @@
 use crate::config::UnisonConfigAction;
 use crate::AppState;
-use log::{error, info};
+use futures::executor::block_on;
+use log::{debug, error};
 use paho_mqtt;
 use std::process;
 
@@ -10,7 +11,12 @@ pub fn do_action(app_state: &AppState, action: &UnisonConfigAction) -> Result<()
         "http" => {
             return do_http_action(&action);
         }
-        "mqtt" => match app_state.mqtt_client.as_ref().unwrap().lock() {
+        "mqtt" => match app_state
+            .mqtt_client
+            .as_ref()
+            .expect("missing mqtt client")
+            .lock()
+        {
             Result::Err(err) => {
                 // need to exit here since there is no recovering from a broken lock
                 error!("failed to lock {}", err);
@@ -37,7 +43,7 @@ fn do_http_action(action: &UnisonConfigAction) -> Result<(), String> {
         .as_ref()
         .unwrap_or(&default_method)
         .to_lowercase();
-    info!("calling {} {}", method, url);
+    debug!("invoking action http {} {}", method, url);
     let response = match method.as_ref() {
         "get" => ureq::get(&url).call(),
         "post" => ureq::post(&url).call(),
@@ -62,11 +68,9 @@ fn do_mqtt_action(
         .as_ref()
         .ok_or_else(|| format!("'mqtt' actions require a payload"))?
         .clone();
+    debug!("invoking action mqtt {}", topic);
 
-    let message = paho_mqtt::Message::new(topic, payload, paho_mqtt::QOS_1);
-    client
-        .publish(message)
-        .wait()
-        .map_err(|err| format!("mqtt publish failed: {}", err))?;
+    let message = paho_mqtt::Message::new(topic, payload, paho_mqtt::QOS_0);
+    block_on(client.publish(message)).map_err(|err| format!("mqtt publish failed: {}", err))?;
     return Result::Ok(());
 }

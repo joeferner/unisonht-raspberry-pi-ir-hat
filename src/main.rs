@@ -8,6 +8,7 @@ use crate::mqtt::init_mqtt;
 use crate::mqtt::send_status_message;
 use log::{error, info};
 use raspberry_pi_ir_hat::Hat;
+use simple_logger::SimpleLogger;
 use std::fs;
 use std::process;
 use std::sync::Arc;
@@ -23,6 +24,7 @@ mod message;
 mod mqtt;
 
 fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfigDevice>), String> {
+    info!("initializing");
     let config_text = fs::read_to_string(&config_env.config_filename).map_err(|err| {
         format!(
             "failed to read file: {}: {}",
@@ -31,16 +33,14 @@ fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfi
     })?;
     let unison_config = UnisonConfig::from_str(&config_text)?;
 
-    let mut app_state = AppState {
+    let app_state = Arc::new(Mutex::new(AppState {
         hat: Option::None,
         mqtt_client: Option::None,
         topic_prefix: config_env.topic_prefix.clone(),
-    };
+    }));
 
     let hat =
         init_hat(&app_state, &config_text).map_err(|err| format!("init hat error: {}", err))?;
-    app_state.hat = Option::Some(Arc::new(Mutex::new(hat)));
-    let app_state = Arc::new(Mutex::new(app_state));
     let mqtt_client =
         init_mqtt(app_state.clone()).map_err(|err| format!("init mqtt error: {}", err))?;
     match app_state.lock() {
@@ -50,6 +50,7 @@ fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfi
             process::exit(1);
         }
         Result::Ok(mut app_state) => {
+            app_state.hat = Option::Some(Arc::new(Mutex::new(hat)));
             app_state.mqtt_client = Option::Some(Arc::new(Mutex::new(mqtt_client)));
         }
     }
@@ -57,6 +58,11 @@ fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfi
 }
 
 fn main() -> Result<(), String> {
+    SimpleLogger::new()
+        .init()
+        .map_err(|err| format!("{}", err))?;
+    info!("starting");
+
     let config_env = ConfigEnv::get()?;
     let status_interval = config_env.status_interval;
     match init(&config_env) {

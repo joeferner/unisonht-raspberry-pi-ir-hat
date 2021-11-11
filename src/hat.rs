@@ -1,17 +1,21 @@
+use std::process;
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use crate::action::do_action;
 use crate::config::UnisonConfig;
 use crate::AppState;
 use crate::ConfigEnv;
+use log::debug;
 use log::error;
 use raspberry_pi_ir_hat::Config;
 use raspberry_pi_ir_hat::{ButtonPress, Hat, HatMessage};
-use simple_logger::SimpleLogger;
 
-pub fn init_hat(app_state: &AppState, config_text: &str) -> std::result::Result<Hat, String> {
+pub fn init_hat(
+    app_state: &Arc<Mutex<AppState>>,
+    config_text: &str,
+) -> std::result::Result<Hat, String> {
     let env = ConfigEnv::get()?;
-    SimpleLogger::new()
-        .init()
-        .map_err(|err| format!("{}", err))?;
 
     let config =
         Config::from_str(config_text).map_err(|err| format!("failed to read config {}", err))?;
@@ -24,9 +28,20 @@ pub fn init_hat(app_state: &AppState, config_text: &str) -> std::result::Result<
         Box::new(move |message| {
             match message {
                 HatMessage::ButtonPress(button_press) => {
-                    if let Result::Err(err) =
-                        handle_button_press(&hat_app_state, &unison_config, &button_press)
-                    {
+                    debug!(
+                        "button press {}:{}",
+                        button_press.remote_name, button_press.button_name
+                    );
+                    if let Result::Err(err) = match hat_app_state.lock() {
+                        Result::Err(err) => {
+                            // need to exit here since there is no recovering from a broken lock
+                            error!("failed to lock {}", err);
+                            process::exit(1);
+                        }
+                        Result::Ok(app_state) => {
+                            handle_button_press(&app_state, &unison_config, &button_press)
+                        }
+                    } {
                         error!("{}", err);
                     }
                 }

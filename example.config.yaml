@@ -4,8 +4,9 @@ remotes:
       volumeUp:
         signal: "100,200,300"
         action: 
-          type: "http"
-          url: "http://localhost/test"
+          type: "mqtt"
+          topic: "ir/test"
+          payload: "{\"button\":\"volumeUp\"}"
       volumeDown:
         signal: "100,200,400"
   test2:

@@ -19,7 +19,7 @@ use std::time::Duration;
 fn mqtt_on_connect_success(client: &paho_mqtt::AsyncClient, _msg_id: u16) {
     info!("mqtt connected");
     let topic_pattern = get_topic_prefix(client) + "#";
-    client.subscribe(topic_pattern, paho_mqtt::QOS_1);
+    client.subscribe(topic_pattern, paho_mqtt::QOS_0);
 }
 
 fn mqtt_on_connect_failure(client: &paho_mqtt::AsyncClient, _msg_id: u16, rc: i32) {
@@ -171,7 +171,7 @@ pub fn send_status_message(
             let status = StatusMessage { devices };
             let status_string: String = serde_json::to_string(&status)
                 .map_err(|err| format!("could not convert status to json: {}", err))?;
-            let msg = paho_mqtt::Message::new(topic, status_string, paho_mqtt::QOS_1);
+            let msg = paho_mqtt::Message::new(topic, status_string, paho_mqtt::QOS_0);
             client
                 .publish(msg)
                 .wait()
