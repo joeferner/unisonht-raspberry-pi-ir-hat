@@ -92,16 +92,16 @@ fn handle_mqtt_message(
     let topic_part = &topic[prefix.len()..];
     return match topic_part {
         "tx" => handle_mqtt_message_transmit(client, payload),
-        "status" => handle_mqtt_message_status(client, payload),
+        "request-status" => handle_mqtt_message_request_status(client, payload),
         _ => Result::Err(format!("unhandled topic for incoming message: {}", topic)),
     };
 }
 
-fn handle_mqtt_message_status(
+fn handle_mqtt_message_request_status(
     client: &paho_mqtt::AsyncClient,
     _payload: &str,
 ) -> Result<(), String> {
-    debug!("handling status request");
+    debug!("handling request-status request");
     let app_state = get_app_state(client);
     return send_status_message(&app_state);
 }
