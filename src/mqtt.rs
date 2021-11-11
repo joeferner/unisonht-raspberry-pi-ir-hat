@@ -2,9 +2,7 @@ use crate::message::StatusMessage;
 use crate::message::TransmitMessage;
 use crate::AppState;
 use crate::ConfigEnv;
-use crate::Hat;
 use crate::StatusMessageDevice;
-use crate::UnisonConfigDevice;
 use log::{debug, error, info, warn};
 use paho_mqtt;
 use raspberry_pi_ir_hat::CurrentChannel;
@@ -15,6 +13,11 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
 use std::time::Duration;
+
+#[derive(Clone)]
+struct AppStateWrapper {
+    state: Arc<Mutex<AppState>>,
+}
 
 fn mqtt_on_connect_success(client: &paho_mqtt::AsyncClient, _msg_id: u16) {
     info!("mqtt connected");
@@ -29,11 +32,13 @@ fn mqtt_on_connect_failure(client: &paho_mqtt::AsyncClient, _msg_id: u16, rc: i3
 }
 
 pub fn init_mqtt(app_state: Arc<Mutex<AppState>>) -> Result<paho_mqtt::AsyncClient, String> {
+    let user_data = AppStateWrapper { state: app_state };
+
     let config_env = ConfigEnv::get()?;
     let create_opts = paho_mqtt::CreateOptionsBuilder::new()
         .server_uri(config_env.mqtt_uri)
         .client_id(config_env.mqtt_client_id)
-        .user_data(Box::new(app_state))
+        .user_data(Box::new(user_data))
         .finalize();
     let mut mqtt_client = paho_mqtt::AsyncClient::new(create_opts)
         .map_err(|err| format!("new mqtt client error {}", err))?;
@@ -87,8 +92,17 @@ fn handle_mqtt_message(
     let topic_part = &topic[prefix.len()..];
     return match topic_part {
         "tx" => handle_mqtt_message_transmit(client, payload),
+        "status" => handle_mqtt_message_status(client, payload),
         _ => Result::Err(format!("unhandled topic for incoming message: {}", topic)),
     };
+}
+
+fn handle_mqtt_message_status(
+    client: &paho_mqtt::AsyncClient,
+    _payload: &str,
+) -> Result<(), String> {
+    let app_state = get_app_state(client);
+    return send_status_message(&app_state);
 }
 
 fn handle_mqtt_message_transmit(
@@ -97,13 +111,22 @@ fn handle_mqtt_message_transmit(
 ) -> Result<(), String> {
     let message: TransmitMessage = serde_json::from_str(payload)
         .map_err(|err| format!("invalid transmit message: {}", err))?;
-    match get_hat(client).lock() {
+    debug!(
+        "transmitting {}:{}",
+        message.remote_name, message.button_name
+    );
+    match get_app_state(client).lock() {
         Result::Err(err) => {
             // cannot recover from a bad lock
             error!("failed to lock {}", err);
             process::exit(1);
         }
-        Result::Ok(mut hat) => match hat.transmit(&message.remote_name, &message.button_name) {
+        Result::Ok(mut app_state) => match app_state
+            .hat
+            .as_mut()
+            .expect("hat not set")
+            .transmit(&message.remote_name, &message.button_name)
+        {
             Result::Err(err) => match err {
                 HatError::InvalidButton {
                     remote_name,
@@ -128,21 +151,17 @@ fn handle_mqtt_message_transmit(
     };
 }
 
-pub fn send_status_message(
-    client: &paho_mqtt::AsyncClient,
-    topic: &str,
-    device_configs: &Vec<UnisonConfigDevice>,
-) -> Result<(), String> {
-    match get_hat(client).lock() {
+pub fn send_status_message(app_state: &Arc<Mutex<AppState>>) -> Result<(), String> {
+    match app_state.lock() {
         Result::Err(err) => {
             // need to exit here since there is no recovering from a broken lock
             error!("failed to lock {}", err);
             process::exit(1);
         }
-        Result::Ok(mut hat) => {
+        Result::Ok(mut app_state) => {
             let mut devices: HashMap<String, StatusMessageDevice> = HashMap::new();
             for ch in [CurrentChannel::Channel0, CurrentChannel::Channel1] {
-                match hat.get_current(ch) {
+                match app_state.hat.as_mut().expect("hat not set").get_current(ch) {
                     Result::Err(err) => match err {
                         HatError::Timeout(err) => {
                             return Result::Err(format!("timeout: {}", err));
@@ -153,8 +172,8 @@ pub fn send_status_message(
                     },
                     Result::Ok(resp) => {
                         let device_config = match ch {
-                            CurrentChannel::Channel0 => device_configs.get(0),
-                            CurrentChannel::Channel1 => device_configs.get(1),
+                            CurrentChannel::Channel0 => app_state.unison_config.devices.get(0),
+                            CurrentChannel::Channel1 => app_state.unison_config.devices.get(1),
                         };
                         if let Option::Some(device_config) = device_config {
                             devices.insert(
@@ -171,8 +190,12 @@ pub fn send_status_message(
             let status = StatusMessage { devices };
             let status_string: String = serde_json::to_string(&status)
                 .map_err(|err| format!("could not convert status to json: {}", err))?;
-            let msg = paho_mqtt::Message::new(topic, status_string, paho_mqtt::QOS_0);
-            client
+            let status_topic = app_state.topic_prefix.clone() + "status";
+            let msg = paho_mqtt::Message::new(status_topic, status_string, paho_mqtt::QOS_0);
+            app_state
+                .mqtt_client
+                .as_ref()
+                .expect("mqtt_client not set")
                 .publish(msg)
                 .wait()
                 .map_err(|err| format!("publish error: {}", err))?;
@@ -181,12 +204,14 @@ pub fn send_status_message(
     }
 }
 
-fn get_app_state(client: &paho_mqtt::AsyncClient) -> &Arc<Mutex<AppState>> {
+fn get_app_state(client: &paho_mqtt::AsyncClient) -> Arc<Mutex<AppState>> {
     return client
         .user_data()
         .unwrap()
-        .downcast_ref::<Arc<Mutex<AppState>>>()
-        .unwrap();
+        .downcast_ref::<AppStateWrapper>()
+        .unwrap()
+        .state
+        .clone();
 }
 
 fn get_topic_prefix(client: &paho_mqtt::AsyncClient) -> String {
@@ -197,16 +222,5 @@ fn get_topic_prefix(client: &paho_mqtt::AsyncClient) -> String {
             process::exit(1);
         }
         Result::Ok(app_state) => return app_state.topic_prefix.clone(),
-    };
-}
-
-fn get_hat(client: &paho_mqtt::AsyncClient) -> Arc<Mutex<Hat>> {
-    match get_app_state(client).lock() {
-        Result::Err(err) => {
-            // need to exit here since there is no recovering from a broken lock
-            error!("failed to lock {}", err);
-            process::exit(1);
-        }
-        Result::Ok(app_state) => return app_state.hat.as_ref().unwrap().clone(),
     };
 }

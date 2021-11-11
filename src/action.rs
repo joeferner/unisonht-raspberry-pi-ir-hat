@@ -1,9 +1,8 @@
 use crate::config::UnisonConfigAction;
 use crate::AppState;
 use futures::executor::block_on;
-use log::{debug, error};
+use log::debug;
 use paho_mqtt;
-use std::process;
 
 pub fn do_action(app_state: &AppState, action: &UnisonConfigAction) -> Result<(), String> {
     let action_type: &str = &action.action_type;
@@ -11,21 +10,12 @@ pub fn do_action(app_state: &AppState, action: &UnisonConfigAction) -> Result<()
         "http" => {
             return do_http_action(&action);
         }
-        "mqtt" => match app_state
-            .mqtt_client
-            .as_ref()
-            .expect("missing mqtt client")
-            .lock()
-        {
-            Result::Err(err) => {
-                // need to exit here since there is no recovering from a broken lock
-                error!("failed to lock {}", err);
-                process::exit(1);
-            }
-            Result::Ok(mqtt_client) => {
-                return do_mqtt_action(&mqtt_client, &action);
-            }
-        },
+        "mqtt" => {
+            return do_mqtt_action(
+                app_state.mqtt_client.as_ref().expect("mqtt_client not set"),
+                &action,
+            );
+        }
         _ => {
             return Result::Err(format!("invalid type: {}", action_type));
         }

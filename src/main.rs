@@ -1,13 +1,11 @@
 use crate::app_state::AppState;
 use crate::config::UnisonConfig;
-use crate::config::UnisonConfigDevice;
 use crate::config_env::ConfigEnv;
 use crate::hat::init_hat;
 use crate::message::StatusMessageDevice;
 use crate::mqtt::init_mqtt;
 use crate::mqtt::send_status_message;
 use log::{error, info};
-use raspberry_pi_ir_hat::Hat;
 use simple_logger::SimpleLogger;
 use std::fs;
 use std::process;
@@ -23,7 +21,7 @@ mod hat;
 mod message;
 mod mqtt;
 
-fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfigDevice>), String> {
+fn init(config_env: &ConfigEnv) -> Result<Arc<Mutex<AppState>>, String> {
     info!("initializing");
     let config_text = fs::read_to_string(&config_env.config_filename).map_err(|err| {
         format!(
@@ -31,12 +29,12 @@ fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfi
             config_env.config_filename, err
         )
     })?;
-    let unison_config = UnisonConfig::from_str(&config_text)?;
 
     let app_state = Arc::new(Mutex::new(AppState {
         hat: Option::None,
         mqtt_client: Option::None,
         topic_prefix: config_env.topic_prefix.clone(),
+        unison_config: UnisonConfig::from_str(&config_text)?,
     }));
 
     let hat =
@@ -50,14 +48,14 @@ fn init(config_env: &ConfigEnv) -> Result<(Arc<Mutex<AppState>>, Vec<UnisonConfi
             process::exit(1);
         }
         Result::Ok(mut app_state) => {
-            app_state.hat = Option::Some(Arc::new(Mutex::new(hat)));
-            app_state.mqtt_client = Option::Some(Arc::new(Mutex::new(mqtt_client)));
+            app_state.hat = Option::Some(hat);
+            app_state.mqtt_client = Option::Some(mqtt_client);
         }
     }
-    return Result::Ok((app_state, unison_config.devices));
+    return Result::Ok(app_state);
 }
 
-fn main() -> Result<(), String> {
+fn run() -> Result<(), String> {
     SimpleLogger::new()
         .init()
         .map_err(|err| format!("{}", err))?;
@@ -70,36 +68,23 @@ fn main() -> Result<(), String> {
             error!("init failed: {}", err);
             process::exit(1);
         }
-        Result::Ok((app_state, device_configs)) => {
+        Result::Ok(app_state) => {
             info!("started");
-            let (status_topic, mqtt_client_mutex) = match app_state.lock() {
-                Result::Err(err) => {
-                    // need to exit here since there is no recovering from a broken lock
-                    error!("failed to lock {}", err);
-                    process::exit(1);
-                }
-                Result::Ok(app_state) => {
-                    let status_topic = app_state.topic_prefix.clone() + "status";
-                    let mqtt_client_mutex = app_state.mqtt_client.as_ref().unwrap().clone();
-                    (status_topic, mqtt_client_mutex)
-                }
-            };
             loop {
                 thread::sleep(status_interval);
-                match mqtt_client_mutex.lock() {
-                    Result::Err(err) => {
-                        // cannot recover from a bad lock
-                        error!("failed to lock {}", err);
-                        process::exit(1);
-                    }
-                    Result::Ok(client) => {
-                        send_status_message(&client, &status_topic, &device_configs)
-                            .unwrap_or_else(|err| {
-                                error!("failed to send status heartbeat: {}", err)
-                            });
-                    }
-                }
+                send_status_message(&app_state)
+                    .unwrap_or_else(|err| error!("failed to send status heartbeat: {}", err));
             }
         }
+    }
+}
+
+fn main() {
+    match run() {
+        Result::Err(err) => {
+            error!("{}", err);
+            process::exit(1);
+        }
+        Result::Ok(_) => {}
     }
 }
