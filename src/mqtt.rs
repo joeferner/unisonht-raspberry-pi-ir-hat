@@ -3,6 +3,7 @@ use crate::message::TransmitMessage;
 use crate::AppState;
 use crate::ConfigEnv;
 use crate::StatusMessageDevice;
+use futures::executor::block_on;
 use log::{debug, error, info, warn};
 use paho_mqtt;
 use raspberry_pi_ir_hat::CurrentChannel;
@@ -194,13 +195,14 @@ pub fn send_status_message(app_state: &Arc<Mutex<AppState>>) -> Result<(), Strin
             let status_topic = app_state.topic_prefix.clone() + "status";
             let msg = paho_mqtt::Message::new(status_topic, status_string, paho_mqtt::QOS_0);
             debug!("sending status");
-            app_state
-                .mqtt_client
-                .as_ref()
-                .expect("mqtt_client not set")
-                .publish(msg)
-                .wait_for(Duration::from_secs(5))
-                .map_err(|err| format!("publish error: {}", err))?;
+            block_on(
+                app_state
+                    .mqtt_client
+                    .as_ref()
+                    .expect("mqtt_client not set")
+                    .publish(msg),
+            )
+            .map_err(|err| format!("mqtt publish failed: {}", err))?;
             return Result::Ok(());
         }
     }
