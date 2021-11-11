@@ -6,7 +6,7 @@ use crate::message::StatusMessageDevice;
 use crate::mqtt::init_mqtt;
 use crate::mqtt::send_status_message;
 use log::{error, info};
-use simple_logger::SimpleLogger;
+use simple_logger;
 use std::fs;
 use std::process;
 use std::sync::Arc;
@@ -55,9 +55,7 @@ fn init(config_env: &ConfigEnv) -> Result<Arc<Mutex<AppState>>, String> {
 }
 
 fn run() -> Result<(), String> {
-    SimpleLogger::new()
-        .init()
-        .map_err(|err| format!("{}", err))?;
+    simple_logger::init_with_env().map_err(|err| format!("{}", err))?;
     info!("starting");
 
     let config_env = ConfigEnv::get()?;
