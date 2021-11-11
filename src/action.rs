@@ -1,6 +1,7 @@
+use std::time::Duration;
+
 use crate::config::UnisonConfigAction;
 use crate::AppState;
-use futures::executor::block_on;
 use log::debug;
 use paho_mqtt;
 
@@ -61,6 +62,9 @@ fn do_mqtt_action(
     debug!("invoking action mqtt {}", topic);
 
     let message = paho_mqtt::Message::new(topic, payload, paho_mqtt::QOS_0);
-    block_on(client.publish(message)).map_err(|err| format!("mqtt publish failed: {}", err))?;
+    client
+        .publish(message)
+        .wait_for(Duration::from_secs(1))
+        .map_err(|err| format!("mqtt publish failed: {}", err))?;
     return Result::Ok(());
 }
