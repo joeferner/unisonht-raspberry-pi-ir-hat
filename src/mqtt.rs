@@ -101,6 +101,7 @@ fn handle_mqtt_message_status(
     client: &paho_mqtt::AsyncClient,
     _payload: &str,
 ) -> Result<(), String> {
+    debug!("handling status request");
     let app_state = get_app_state(client);
     return send_status_message(&app_state);
 }
@@ -112,7 +113,7 @@ fn handle_mqtt_message_transmit(
     let message: TransmitMessage = serde_json::from_str(payload)
         .map_err(|err| format!("invalid transmit message: {}", err))?;
     debug!(
-        "transmitting {}:{}",
+        "handling transmit request {}:{}",
         message.remote_name, message.button_name
     );
     match get_app_state(client).lock() {
@@ -192,12 +193,13 @@ pub fn send_status_message(app_state: &Arc<Mutex<AppState>>) -> Result<(), Strin
                 .map_err(|err| format!("could not convert status to json: {}", err))?;
             let status_topic = app_state.topic_prefix.clone() + "status";
             let msg = paho_mqtt::Message::new(status_topic, status_string, paho_mqtt::QOS_0);
+            debug!("sending status");
             app_state
                 .mqtt_client
                 .as_ref()
                 .expect("mqtt_client not set")
                 .publish(msg)
-                .wait()
+                .wait_for(Duration::from_secs(5))
                 .map_err(|err| format!("publish error: {}", err))?;
             return Result::Ok(());
         }
