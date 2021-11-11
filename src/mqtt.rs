@@ -16,6 +16,7 @@ use std::process;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::thread;
+use std::time::Duration;
 
 pub fn init_mqtt(app_state: &Arc<Mutex<AppState>>) -> Result<rumqttc::Client, String> {
     let config_env = ConfigEnv::get()?;
@@ -42,6 +43,7 @@ fn mqtt_poll(app_state: &Arc<Mutex<AppState>>, connection: &mut rumqttc::Connect
         match notification {
             Result::Err(err) => {
                 error!("mqtt connection error {}", err);
+                thread::sleep(Duration::from_secs(1));
             }
             Result::Ok(event) => match event {
                 Event::Incoming(incoming_event) => match incoming_event {
