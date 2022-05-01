@@ -1,0 +1,67 @@
+{
+    "version": 1,
+    "defaultModeId": "1d4a0294-39e4-4631-a615-1c7a14e14ae0",
+    "plugins": [
+        {
+            "id": "2cb14523-90cc-4e6b-ba2b-b286b0eb33e9",
+            "name": "Web Remote",
+            "pluginFactory": "WebRemotePluginFactory",
+            "data": {
+                "buttons": [
+                    "UP",
+                    "DOWN",
+                    "LEFT",
+                    "RIGHT",
+                    "OK",
+                    "BACK"
+                ]
+            }
+        },
+        {
+            "id": "f0dfaa58-cf1c-495e-938d-bec5744dc51a",
+            "name": "Raspberry PI IR Hat",
+            "pluginFactory": "../unisonht-raspberry-pi-ir-hat:RaspberryPiIrHatPluginFactory",
+            "data": {
+                "irHatPath": "/dev/usart1"
+            }
+        }
+    ],
+    "modes": [
+        {
+            "id": "1d4a0294-39e4-4631-a615-1c7a14e14ae0",
+            "name": "ON",
+            "buttons": [
+                {
+                    "name": "*",
+                    "actions": [
+                        {
+                            "type": "forwardToDevice",
+                            "deviceId": "efd7ffd4-38e3-48d7-85cf-a911da8e8da7"
+                        }
+                    ]
+                }
+            ]
+        }
+    ],
+    "devices": [
+        {
+            "id": "efd7ffd4-38e3-48d7-85cf-a911da8e8da7",
+            "name": "IR Device",
+            "deviceFactory": "../unisonht-raspberry-pi-ir-hat:RaspberryPiIrHatDeviceFactory",
+            "activeModeIds": [
+                "1d4a0294-39e4-4631-a615-1c7a14e14ae0"
+            ],
+            "data": {
+                "buttons": [
+                    {
+                        "name": "POWER_ON",
+                        "protocol": 1,
+                        "address": 1,
+                        "command": 1,
+                        "numberOfRepeats": 3
+                    }
+                ]
+            }
+        }
+    ]
+}
